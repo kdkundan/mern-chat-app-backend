@@ -1,5 +1,6 @@
 import { Server as SocketIOServer, Socket } from "socket.io";
 import { DefaultEventsMap } from "socket.io/dist/typed-events";
+import { getUserChatIds } from "../../services/chat.services";
 
 // Types for better type safety
 interface ConnectionInfo {
@@ -111,6 +112,35 @@ export const handleConnection = (
 
     logEvent("🔌 New connection", { socketId: socket.id, userId, username });
 
+    // Automatically join all user's chat rooms
+    (async () => {
+      try {
+        const userChatIds = await getUserChatIds(userId);
+
+        if (userChatIds.length > 0) {
+          userChatIds.forEach((chatId) => {
+            const roomId = formatRoomId(chatId);
+            socket.join(roomId);
+            connectionManager.addRoomToConnection(socket.id, chatId);
+          });
+
+          logEvent("✅ Auto-joined chats", {
+            socketId: socket.id,
+            userId,
+            chatsCount: userChatIds.length,
+            chatIds: userChatIds,
+          });
+        } else {
+          logEvent("ℹ️ No existing chats found", {
+            socketId: socket.id,
+            userId,
+          });
+        }
+      } catch (error) {
+        console.error("Error auto-joining user chats:", error);
+      }
+    })();
+
     // Handle joining chat rooms
     socket.on("joinChat", (chatId: string) => {
       try {
@@ -135,31 +165,16 @@ export const handleConnection = (
       }
     });
 
-    // Handle messages with typing indicator
-    let typingTimeout: NodeJS.Timeout;
-
-    socket.on("typing", (chatId: string) => {
-      const roomId = formatRoomId(chatId);
-      socket.to(roomId).emit("userTyping", { userId, username });
-
-      // Clear previous timeout
-      if (typingTimeout) {
-        clearTimeout(typingTimeout);
-      }
-
-      // Set new timeout to stop typing indicator after 2 seconds
-      typingTimeout = setTimeout(() => {
-        socket.to(roomId).emit("userStoppedTyping", { userId });
-      }, 2000);
-    });
-
     socket.on("sendMessage", async (messageData: MessageData) => {
       try {
         const roomId = formatRoomId(messageData.chat);
-        const room = io.sockets.adapter.rooms.get(roomId);
+        let room = io.sockets.adapter.rooms.get(roomId);
 
-        if (!room) {
-          throw new Error("Chat room not found");
+        // Auto-join room if not already in it
+        if (!room || !room.has(socket.id)) {
+          socket.join(roomId);
+          connectionManager.addRoomToConnection(socket.id, messageData.chat);
+          room = io.sockets.adapter.rooms.get(roomId);
         }
 
         // Add server timestamp
